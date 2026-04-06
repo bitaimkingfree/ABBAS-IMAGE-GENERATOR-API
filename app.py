@@ -1,11 +1,58 @@
 from flask import Flask, request, jsonify
-import os
-import openai
+import requests
+import json
 
 app = Flask(__name__)
 
-# Set your OpenAI API key in environment variable
-openai.api_key = os.getenv("OPENAI_API_KEY")
+BASE_URL = "https://genpick.app"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Content-Type": "application/json",
+    "Accept": "text/event-stream"
+}
+
+
+def create_job(prompt, num_images=2, aspect="1:1", style="diversity"):
+    url = f"{BASE_URL}/api/imagen?async=true"
+    payload = {
+        "prompt": prompt,
+        "aspectRatio": aspect,
+        "numberOfImages": num_images,
+        "style": style
+    }
+    try:
+        r = requests.post(url, headers=HEADERS, json=payload)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("jobId")
+    except Exception as e:
+        print("❌ Job creation failed:", e)
+        return None
+
+
+def fetch_images(job_id):
+    url = f"{BASE_URL}/api/imagen/jobs/{job_id}"
+    params = {"stream": "true"}
+    images = []
+
+    try:
+        with requests.get(url, headers=HEADERS, params=params, stream=True) as r:
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                decoded = line.decode("utf-8")
+                if decoded.startswith("data:"):
+                    try:
+                        data = json.loads(decoded.replace("data:", "").strip())
+                        if "imageUrl" in data:
+                            images.append(data["imageUrl"])
+                    except:
+                        continue
+    except Exception as e:
+        print("❌ Fetching images failed:", e)
+
+    return images
+
 
 @app.route("/gen", methods=["GET"])
 def generate_images_api():
@@ -14,31 +61,22 @@ def generate_images_api():
         return jsonify({"success": False, "error": "Missing 'prompt' parameter"}), 400
 
     num_images = int(request.args.get("num", 2))
+    aspect = request.args.get("aspect", "1:1")
+    style = request.args.get("style", "diversity")
 
-    try:
-        response = openai.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024",
-            n=num_images
-        )
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+    job_id = create_job(prompt, num_images, aspect, style)
+    if not job_id:
+        return jsonify({"success": False, "error": "Job creation failed"}), 500
 
-    # Format images as list of objects with id and url
-    images = [{"id": idx + 1, "url": img["url"]} for idx, img in enumerate(response.data)]
-
-    # Use a random job_id (or timestamp) since OpenAI doesn't provide one
-    import uuid
-    job_id = str(uuid.uuid4())
+    images = fetch_images(job_id)
 
     return jsonify({
         "success": True,
         "prompt": prompt,
         "job_id": job_id,
+        "count": len(images),
         "images": images
     })
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+# No app.run() needed for Vercel
